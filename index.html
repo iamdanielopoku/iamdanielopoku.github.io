@@ -1,0 +1,249 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="theme-color" content="#1c2433">
+<link rel="manifest" href="manifest.json">
+<link rel="icon" href="icon.svg">
+<title>Voice Journal</title>
+<style>
+:root{--paper:#eef1ee;--card:#fff;--ink:#1c2433;--mute:#667085;--line:#d5dbd6;--rec:#d6452b;--ok:#0f6b62}
+@media(prefers-color-scheme:dark){:root{--paper:#141a26;--card:#1c2433;--ink:#e8ecf2;--mute:#97a1b3;--line:#2c3649;--rec:#ff6b4d;--ok:#4cc2b4}}
+*{box-sizing:border-box}
+html,body{margin:0}
+body{background:var(--paper);color:var(--ink);font:16px/1.5 system-ui,sans-serif;padding:env(safe-area-inset-top) 0 env(safe-area-inset-bottom)}
+main{max-width:640px;margin:0 auto;padding:16px}
+header{display:flex;align-items:center;justify-content:space-between;gap:8px}
+h1{font:600 22px Georgia,serif;margin:0}
+button{font:inherit;color:inherit;background:none;border:1px solid var(--line);border-radius:8px;padding:8px 12px;cursor:pointer}
+button:focus-visible,textarea:focus-visible,input:focus-visible{outline:3px solid var(--ok);outline-offset:2px}
+.bar{display:flex;gap:8px}
+#status{color:var(--mute);font-size:14px;min-height:21px;margin:8px 0}
+.compose{background:var(--card);border:1px solid var(--line);border-radius:14px;padding:16px;text-align:center}
+#mic{width:96px;height:96px;border-radius:50%;background:var(--ink);color:var(--paper);border:0;font-size:36px;line-height:1}
+#mic[aria-pressed=true]{background:var(--rec);animation:pulse 1.4s infinite}
+@keyframes pulse{50%{box-shadow:0 0 0 14px color-mix(in srgb,var(--rec) 22%,transparent)}}
+@media(prefers-reduced-motion:reduce){#mic[aria-pressed=true]{animation:none}}
+textarea{width:100%;min-height:110px;margin-top:14px;padding:10px;border:1px solid var(--line);border-radius:8px;background:var(--paper);color:var(--ink);font:17px/1.5 Georgia,serif;resize:vertical}
+.row{display:flex;gap:8px;align-items:center;justify-content:space-between;margin-top:10px}
+input[type=date]{font:inherit;color:inherit;background:var(--paper);border:1px solid var(--line);border-radius:8px;padding:6px 8px}
+#save{background:var(--ok);color:#fff;border-color:var(--ok);font-weight:600}
+h2{font:600 15px system-ui;color:var(--mute);margin:26px 0 8px}
+.entry{background:var(--card);border:1px solid var(--line);border-radius:10px;padding:12px 14px;margin-bottom:8px}
+.entry p{margin:4px 0 8px;font:17px/1.55 Georgia,serif;white-space:pre-wrap}
+.meta{display:flex;justify-content:space-between;align-items:center;color:var(--mute);font-size:14px}
+.meta button{padding:4px 10px;font-size:14px}
+.dot{display:inline-block;width:8px;height:8px;border-radius:50%;background:var(--line);margin-right:6px}
+.dot.on{background:var(--ok)}
+#empty{color:var(--mute);text-align:center;padding:24px}
+</style>
+</head>
+<body>
+<main>
+  <header>
+    <h1>Voice Journal</h1>
+    <div class="bar">
+      <button id="readToday">Read today</button>
+      <button id="sync">Sync to Drive</button>
+    </div>
+  </header>
+  <div id="status" role="status" aria-live="polite"></div>
+
+  <section class="compose">
+    <button id="mic" aria-pressed="false" aria-label="Start speaking">🎙</button>
+    <textarea id="text" placeholder="Tap the mic and speak. You can edit the text before saving."></textarea>
+    <div class="row">
+      <input type="date" id="date" aria-label="Entry date">
+      <button id="save">Save entry</button>
+    </div>
+  </section>
+
+  <div id="list"></div>
+</main>
+
+<script>
+// ====== SETUP: paste your Google OAuth Web Client ID here ======
+const CLIENT_ID = '940097663317-hp0d2jjqd4jd8vg6tekpleq59k4r43mn.apps.googleusercontent.com';
+// ===============================================================
+const SCOPE = 'https://www.googleapis.com/auth/drive.file';
+const FOLDER = 'Voice Journal';
+const $ = id => document.getElementById(id);
+const pad = n => String(n).padStart(2, '0');
+const ymd = d => `${d.getFullYear()}-${pad(d.getMonth()+1)}-${pad(d.getDate())}`;
+const hm = d => `${pad(d.getHours())}:${pad(d.getMinutes())}`;
+const say = m => $('status').textContent = m;
+
+let entries = JSON.parse(localStorage.getItem('entries') || '[]');
+const persist = () => localStorage.setItem('entries', JSON.stringify(entries));
+$('date').value = ymd(new Date());
+
+// ---------- Voice input ----------
+const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
+let rec, listening = false, finalText = '';
+if (!SR) { say('Speech recognition is not supported in this browser. Use Chrome on Android.'); $('mic').disabled = true; }
+else {
+  rec = new SR();
+  rec.lang = navigator.language || 'en-US';
+  rec.continuous = true;
+  rec.interimResults = true;
+  rec.onresult = e => {
+    let interim = '';
+    for (let i = e.resultIndex; i < e.results.length; i++) {
+      const t = e.results[i][0].transcript;
+      if (e.results[i].isFinal) finalText += (finalText && !/\s$/.test(finalText) ? ' ' : '') + t.trim();
+      else interim += t;
+    }
+    $('text').value = finalText + (interim ? ' ' + interim : '');
+  };
+  rec.onend = () => { if (listening) { try { rec.start(); } catch {} } };  // Android stops after silence; keep going
+  rec.onerror = e => { if (e.error === 'not-allowed') { listening = false; setMic(); say('Microphone permission denied.'); } };
+}
+function setMic() {
+  $('mic').setAttribute('aria-pressed', listening);
+  $('mic').setAttribute('aria-label', listening ? 'Stop listening' : 'Start speaking');
+  if (!listening && $('status').textContent === 'Listening…') say('');
+}
+$('mic').onclick = () => {
+  if (listening) { listening = false; rec.stop(); setMic(); return; }
+  finalText = $('text').value.trim();
+  listening = true; setMic(); say('Listening…');
+  try { rec.start(); } catch {}
+};
+
+// ---------- Saving entries ----------
+function parseDate(text, dateStr) {
+  // "for yesterday ..." / "for 3 days ago ..." at the start overrides the date picker
+  const m = text.match(/^\s*(?:this is\s+)?for\s+(yesterday|(\d+)\s+days?\s+ago)[,.:]?\s*/i);
+  if (!m) return { text, dateStr };
+  const d = new Date(); d.setDate(d.getDate() - (m[2] ? +m[2] : 1));
+  return { text: text.slice(m[0].length), dateStr: ymd(d) };
+}
+$('save').onclick = () => {
+  if (listening) { listening = false; rec.stop(); setMic(); }
+  const raw = $('text').value.trim();
+  if (!raw) return say('Nothing to save yet.');
+  const { text, dateStr } = parseDate(raw, $('date').value || ymd(new Date()));
+  entries.push({ id: Date.now(), date: dateStr, time: hm(new Date()), text, synced: false });
+  persist(); $('text').value = ''; finalText = ''; $('date').value = ymd(new Date());
+  render(); say('Saved on this device.');
+  if (token) syncDrive(); // auto-sync if already signed in
+};
+
+// ---------- Text to speech ----------
+function speak(txt) {
+  speechSynthesis.cancel();
+  const u = new SpeechSynthesisUtterance(txt);
+  u.lang = navigator.language || 'en-US';
+  speechSynthesis.speak(u);
+}
+$('readToday').onclick = () => {
+  const t = entries.filter(e => e.date === ymd(new Date())).map(e => e.text).join('. ');
+  t ? speak(t) : say('No entries for today.');
+};
+
+// ---------- List ----------
+function render() {
+  const list = $('list'); list.textContent = '';
+  if (!entries.length) { list.innerHTML = '<div id="empty">No entries yet. Tap the mic and say what happened today.</div>'; return; }
+  const days = [...new Set(entries.map(e => e.date))].sort().reverse();
+  for (const day of days) {
+    const h = document.createElement('h2');
+    h.textContent = new Date(day + 'T00:00').toLocaleDateString(undefined, { weekday: 'long', day: 'numeric', month: 'long', year: 'numeric' });
+    list.append(h);
+    for (const e of entries.filter(x => x.date === day).sort((a, b) => a.id - b.id)) {
+      const el = document.createElement('div'); el.className = 'entry';
+      const p = document.createElement('p'); p.textContent = e.text;
+      const meta = document.createElement('div'); meta.className = 'meta';
+      const left = document.createElement('span');
+      left.innerHTML = `<span class="dot ${e.synced ? 'on' : ''}"></span>`;
+      left.append(`${e.time} · ${e.synced ? 'In Drive' : 'Not synced'}`);
+      const acts = document.createElement('span');
+      const r = document.createElement('button'); r.textContent = 'Read aloud'; r.onclick = () => speak(e.text);
+      const d = document.createElement('button'); d.textContent = 'Delete'; d.style.marginLeft = '6px';
+      d.onclick = () => { if (confirm('Delete this entry from this device? (Drive copy is kept.)')) { entries = entries.filter(x => x.id !== e.id); persist(); render(); } };
+      acts.append(r, d); meta.append(left, acts); el.append(p, meta); list.append(el);
+    }
+  }
+}
+
+// ---------- Google Drive sync ----------
+let token = null, tokenClient;
+function getToken() {
+  return new Promise((res, rej) => {
+    if (!window.google || !google.accounts) return rej(new Error('Google sign-in script not loaded (are you online?)'));
+    tokenClient = tokenClient || google.accounts.oauth2.initTokenClient({ client_id: CLIENT_ID, scope: SCOPE, callback: () => {} });
+    tokenClient.callback = r => {
+      if (r.error) return rej(new Error(r.error));
+      token = r.access_token; setTimeout(() => token = null, (r.expires_in - 60) * 1000); res(token);
+    };
+    tokenClient.requestAccessToken({ prompt: token === null && !localStorage.getItem('consented') ? 'consent' : '' });
+    localStorage.setItem('consented', '1');
+  });
+}
+async function drive(url, opts = {}) {
+  const r = await fetch(url, { ...opts, headers: { Authorization: 'Bearer ' + token, ...(opts.headers || {}) } });
+  if (!r.ok) throw new Error('Drive error ' + r.status);
+  return r;
+}
+const q = s => encodeURIComponent(s);
+async function findOne(query) {
+  const r = await (await drive(`https://www.googleapis.com/drive/v3/files?q=${q(query)}&fields=files(id)&spaces=drive`)).json();
+  return r.files[0]?.id;
+}
+async function ensureFolder() {
+  let id = localStorage.getItem('folderId');
+  if (id) return id;
+  id = await findOne(`name='${FOLDER}' and mimeType='application/vnd.google-apps.folder' and trashed=false`);
+  if (!id) id = (await (await drive('https://www.googleapis.com/drive/v3/files', {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ name: FOLDER, mimeType: 'application/vnd.google-apps.folder' })
+  })).json()).id;
+  localStorage.setItem('folderId', id); return id;
+}
+async function appendToDay(folderId, day, block) {
+  const name = day + '.md';
+  const fileId = await findOne(`name='${name}' and '${folderId}' in parents and trashed=false`);
+  if (fileId) {
+    const old = await (await drive(`https://www.googleapis.com/drive/v3/files/${fileId}?alt=media`)).text();
+    await drive(`https://www.googleapis.com/upload/drive/v3/files/${fileId}?uploadType=media`, {
+      method: 'PATCH', headers: { 'Content-Type': 'text/markdown' }, body: old.trimEnd() + '\n\n' + block + '\n'
+    });
+  } else {
+    const b = 'jrnl' + Date.now();
+    const body = `--${b}\r\nContent-Type: application/json\r\n\r\n${JSON.stringify({ name, parents: [folderId], mimeType: 'text/markdown' })}\r\n--${b}\r\nContent-Type: text/markdown\r\n\r\n# ${day}\n\n${block}\n\r\n--${b}--`;
+    await drive('https://www.googleapis.com/upload/drive/v3/files?uploadType=multipart', {
+      method: 'POST', headers: { 'Content-Type': 'multipart/related; boundary=' + b }, body
+    });
+  }
+}
+let syncing = false;
+async function syncDrive() {
+  if (syncing) return;
+  const pending = entries.filter(e => !e.synced);
+  if (!pending.length) return say('Everything is already in Drive.');
+  if (CLIENT_ID.startsWith('YOUR_')) return say('Add your Google Client ID in index.html first.');
+  syncing = true;
+  try {
+    say('Signing in…'); if (!token) await getToken();
+    say('Syncing…');
+    const folder = await ensureFolder();
+    for (const day of [...new Set(pending.map(e => e.date))]) {
+      const dayEntries = pending.filter(e => e.date === day).sort((a, b) => a.id - b.id);
+      await appendToDay(folder, day, dayEntries.map(e => `**${e.time}** ${e.text}`).join('\n\n'));
+      dayEntries.forEach(e => e.synced = true); persist();
+    }
+    render(); say(`Synced ${pending.length} ${pending.length === 1 ? 'entry' : 'entries'} to Drive.`);
+  } catch (err) {
+    say(err.message + '. Entries are safe on this device; tap Sync to Drive to retry.');
+  } finally { syncing = false; }
+}
+$('sync').onclick = syncDrive;
+window.addEventListener('online', () => token && syncDrive());
+
+render();
+if ('serviceWorker' in navigator) navigator.serviceWorker.register('sw.js');
+</script>
+<script src="https://accounts.google.com/gsi/client" async defer></script>
+</body>
+</html>
