@@ -87,16 +87,31 @@ else {
   rec.lang = navigator.language || 'en-US';
   rec.continuous = true;
   rec.interimResults = true;
+  // Android Chrome re-sends each growing phrase as a new result ("yes", "yes so", "yes so right"...).
+  // So we rebuild the text from ALL results every time, keeping only the longest version of each phrase.
+  const words = s => s.toLowerCase().split(/\s+/).filter(Boolean);
   rec.onresult = e => {
-    let interim = '';
-    for (let i = e.resultIndex; i < e.results.length; i++) {
-      const t = e.results[i][0].transcript;
-      if (e.results[i].isFinal) finalText += (finalText && !/\s$/.test(finalText) ? ' ' : '') + t.trim();
-      else interim += t;
+    const segs = [];
+    for (let i = 0; i < e.results.length; i++) {
+      const t = e.results[i][0].transcript.trim();
+      if (!t) continue;
+      const last = segs[segs.length - 1];
+      if (last) {
+        const a = words(last), b = words(t), n = Math.min(3, a.length, b.length);
+        if (n > 0 && a.slice(0, n).join(' ') === b.slice(0, n).join(' ')) {  // same phrase, extended or revised
+          if (b.length >= a.length) segs[segs.length - 1] = t;
+          continue;
+        }
+      }
+      segs.push(t);
     }
-    $('text').value = finalText + (interim ? ' ' + interim : '');
+    $('text').value = (finalText ? finalText + ' ' : '') + segs.join(' ');
   };
-  rec.onend = () => { if (listening) { try { rec.start(); } catch {} } };  // Android stops after silence; keep going
+  rec.onend = () => {  // Chrome stops after silence; lock in what we have, then keep listening
+    if (!listening) return;
+    finalText = $('text').value.trim();
+    try { rec.start(); } catch {}
+  };
   rec.onerror = e => { if (e.error === 'not-allowed') { listening = false; setMic(); say('Microphone permission denied.'); } };
 }
 function setMic() {
